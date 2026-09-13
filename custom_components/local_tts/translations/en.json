@@ -1,0 +1,65 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Local TTS service",
+        "description": "Point at the TTS service root (the tts-ui / prod gateway). Voices are the service's prod entries, curated in the tts-ui; each is overridable per call.",
+        "data": {
+          "base_url": "Service URL (e.g. http://homeassistant.local:8100)",
+          "api_key": "API key (optional, blank for local service)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the TTS service at {url} (no /api/prod response)."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Override a prod entry",
+        "description": "Pick a prod entry to view and override its params.",
+        "data": {
+          "entry": "Prod entry"
+        }
+      },
+      "entry": {
+        "title": "{entry}",
+        "description": "{backend} — fields are prefilled with the entry's current values; change one to save it as an override (per-call options still win).",
+        "data": {
+          "task_type": "Task",
+          "voice": "Preset voice (CustomVoice)",
+          "instructions": "Voice description / style cue",
+          "emotion": "Emotion",
+          "style": "Style",
+          "pace": "Pace",
+          "pitch": "Pitch",
+          "expressiveness": "Expressiveness",
+          "temperature": "Temperature",
+          "max_new_tokens": "Max audio tokens",
+          "cfg_value": "CFG strength",
+          "inference_timesteps": "Denoising steps",
+          "normalize": "Normalize numbers/dates"
+        },
+        "data_description": {
+          "task_type": "Synthesis mode: Base clones the reference clip, CustomVoice uses a preset speaker, VoiceDesign follows a text description.",
+          "voice": "Preset speaker name; used only by the CustomVoice task.",
+          "instructions": "Free-text voice/style description; used by the VoiceDesign task.",
+          "emotion": "Colors the whole sentence with an emotion; 'none' is neutral. Works in German too.",
+          "style": "Special speaking style for the whole sentence: whispering, shouting, or singing.",
+          "pace": "Overall speaking speed; 'very slow' only reaches ~0.65x — use inline pause tags for longer gaps.",
+          "pitch": "Sentence pitch: 'lower' ≈ −3 semitones, 'higher' ≈ +2.5.",
+          "expressiveness": "How animated vs flat the delivery is.",
+          "temperature": "Delivery randomness. Lower (0.4–0.6) steadier; higher (1.0+) more varied but can wobble. 0.8 is a good middle.",
+          "max_new_tokens": "Safety cap on audio length (~25 frames/sec, so 1024 ≈ 40s). Raise only if long answers get cut off.",
+          "cfg_value": "Guidance strength. 2.5–3.0 for short sentences, 1.5–2.0 for long or expressive text; above 3.0 risks artifacts.",
+          "inference_timesteps": "Diffusion denoising steps. 10–15 for production; more is higher quality but slower.",
+          "normalize": "Expand numbers, dates and currencies before synthesis."
+        }
+      }
+    },
+    "abort": {
+      "no_entries": "The TTS service has no prod entries to configure."
+    }
+  }
+}
