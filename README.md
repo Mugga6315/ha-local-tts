@@ -22,16 +22,32 @@ reference clips, and forwards to llama-swap. No backend knowledge lives in HA.
 
 ## Streaming
 
-Implements `async_stream_tts_audio`: incoming LLM text is split into sentences,
-each synthesized as a complete WAV via the gateway, re-emitted as one continuous
-WAV stream — first audio after the first sentence, not the whole answer. Falls
-back to the 1-shot path if HA does not stream input.
+Implements `async_stream_tts_audio`: incoming LLM text is split into sentences
+as it arrives, and each sentence's PCM streams from the gateway as the engine
+emits it, re-emitted as one continuous WAV stream — first audio after the first
+chunk of the first sentence, not after the whole answer. Falls back to the
+1-shot path if HA does not stream input.
+
+- **Prefetch.** The next sentence is synthesized while the current one streams
+  (`PREFETCH_DEPTH = 2` in `const.py`), so its first-chunk latency does not
+  become a pause between sentences. The backend must serve that many requests
+  in parallel (vLLM `--max-num-seqs` ≥ 2); otherwise the prefetch simply waits
+  its turn.
+- **Markdown.** LLM replies often contain Markdown. Emphasis markers
+  (`**`, `__`, `*`, backticks), heading `#`s and list bullets are stripped
+  before the text reaches the engine, so they are not spoken.
 
 ## Setup
 
 One config entry: the **service URL** (e.g. `http://homeassistant.local:8100`) and an
 optional API key. The catalog of voices refreshes periodically, so entries
 promoted in the tts-ui appear without re-adding the integration.
+
+## Tests
+
+```bash
+uv run --with pytest pytest tests
+```
 
 ## Legacy
 

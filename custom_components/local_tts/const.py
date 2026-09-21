@@ -21,3 +21,6 @@ LANGUAGES = ["de", "en"]
 
 DEFAULT_TIMEOUT = 300             # per-request ceiling; a long answer can take a while
 REFRESH_INTERVAL = 60             # seconds between prod-entry re-fetches (picks up new ones)
+# Sentences synthesized at once while streaming: the one playing + the next.
+# Needs the backend to serve that many requests in parallel (vLLM --max-num-seqs).
+PREFETCH_DEPTH = 2

@@ -1,16 +1,28 @@
 """Pure audio/text helpers for the streaming path — no Home Assistant imports,
-so they are unit-testable on their own (see demo() at the bottom)."""
+so they are unit-testable on their own (tests/test_audio.py)."""
 
 from __future__ import annotations
 
+import asyncio
 import io
 import re
 import wave
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator, Callable
 
 # End of a sentence: run up to .!?… (plus trailing quotes/brackets) before a
 # space or end, OR a newline. Keeps the delimiter with the sentence.
 _SENTENCE_END = re.compile(r"[^.!?…\n]*(?:[.!?…]+[\"')\]]*(?=\s|$)|\n)", re.DOTALL)
+
+
+# Markdown the LLM writes that a TTS engine would try to pronounce. Only markers
+# go: emphasis runs (** __ * `), a heading's leading #s, a list bullet at line
+# start. A lone `_` inside a word (entity ids) is text, not markup.
+_MARKDOWN = re.compile(r"\*+|`+|(?<!\w)__|__(?!\w)|^\s*#+\s*|^\s*[-•]\s+", re.MULTILINE)
+
+
+def speakable(text: str) -> str:
+    """Text with Markdown formatting removed, ready to send to the TTS engine."""
+    return _MARKDOWN.sub("", text).strip()
 
 
 async def sentences(message_gen: AsyncGenerator[str]) -> AsyncGenerator[str]:
@@ -18,16 +30,64 @@ async def sentences(message_gen: AsyncGenerator[str]) -> AsyncGenerator[str]:
     buf = ""
     async for chunk in message_gen:
         buf += chunk
-        while True:
-            m = _SENTENCE_END.match(buf)
-            if not m or not m.group().strip():
-                break
-            sentence = m.group()
+        # Every match ends in a delimiter, so it always consumes text. A
+        # whitespace-only match (the "\n\n" LLM replies start with) is dropped,
+        # not treated as "no sentence yet", or splitting would stall until the
+        # whole answer arrived.
+        while m := _SENTENCE_END.match(buf):
             buf = buf[m.end():]
-            if sentence.strip():
-                yield sentence.strip()
+            if sentence := m.group().strip():
+                yield sentence
     if buf.strip():
         yield buf.strip()
+
+
+async def prefetched(
+    items: AsyncGenerator[str],
+    fetch: Callable[[str], AsyncGenerator[Any]],
+    depth: int = 2,
+) -> AsyncGenerator[Any]:
+    """Yield everything fetch(item) yields, item by item in order, while up to
+    `depth` fetches run at once — the next sentence synthesizes while the
+    current one is still streaming out. Each fetch buffers into its own queue."""
+    slots = asyncio.Semaphore(depth)
+    jobs: asyncio.Queue = asyncio.Queue()
+    tasks: set[asyncio.Task] = set()  # every task started here; all joined on exit
+    end = object()
+
+    async def pump(item: str, out: asyncio.Queue) -> None:
+        try:
+            async for value in fetch(item):
+                await out.put(value)
+        finally:
+            await out.put(end)
+
+    async def feed() -> None:
+        try:
+            async for item in items:
+                await slots.acquire()
+                out: asyncio.Queue = asyncio.Queue()
+                task = asyncio.create_task(pump(item, out))
+                tasks.add(task)
+                await jobs.put((out, task))
+        finally:
+            await jobs.put(None)
+
+    feeder = asyncio.create_task(feed())
+    tasks.add(feeder)
+    try:
+        while (job := await jobs.get()) is not None:
+            out, task = job
+            while (value := await out.get()) is not end:
+                yield value
+            await task  # re-raises a fetch error; fetch decides what is fatal
+            slots.release()
+        await feeder  # re-raises an error from the text source
+    finally:
+        # Consumer stopped early (or failed): stop all in-flight synth requests.
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def wav_parts(data: bytes) -> tuple[int, int, int, bytes] | None:
@@ -54,43 +114,3 @@ def stream_header(sr: int, sampwidth: int, channels: int) -> bytes:
         b"data", (0xFFFFFFFF).to_bytes(4, "little"),
     ])
 
-
-def demo() -> None:
-    """Self-check: sentence splitting + WAV header/parse round-trip."""
-    import asyncio
-
-    async def _gen(parts):
-        for p in parts:
-            yield p
-
-    async def _collect():
-        # Text split across chunks mid-sentence must reassemble into whole sentences.
-        out = [s async for s in sentences(_gen(
-            ["Hallo Welt. Wie ", "geht es dir?", " Gut!\nNeue Zeile", " hier"]))]
-        assert out == ["Hallo Welt.", "Wie geht es dir?", "Gut!", "Neue Zeile hier"], out
-
-    asyncio.run(_collect())
-
-    # A real 24kHz mono 16-bit WAV parses back to its parameters and PCM length.
-    pcm = (b"\x01\x00" * 2400)  # 0.1s
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as w:
-        w.setnchannels(1)
-        w.setsampwidth(2)
-        w.setframerate(24000)
-        w.writeframes(pcm)
-    parts = wav_parts(buf.getvalue())
-    assert parts is not None, "wav_parts returned None on a valid WAV"
-    sr, sw, ch, frames = parts
-    assert (sr, sw, ch) == (24000, 2, 1), (sr, sw, ch)
-    assert frames == pcm, "PCM round-trip mismatch"
-
-    hdr = stream_header(24000, 2, 1)
-    assert hdr[:4] == b"RIFF" and hdr[8:12] == b"WAVE" and len(hdr) == 44, hdr
-    assert wav_parts(b"not a wav") is None
-
-    print("audio.py demo OK")
-
-
-if __name__ == "__main__":
-    demo()

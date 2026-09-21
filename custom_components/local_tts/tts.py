@@ -3,9 +3,11 @@
 Voices are the service's prod entries: named, tuned configurations (backend +
 params + reference clip) curated in the tts-ui. HA picks one by id and may
 override any of its params per call; the service shapes the backend request and
-resolves reference clips. Streaming: incoming LLM text is split into sentences,
-each synthesized as a complete WAV, then re-emitted as one continuous WAV stream
-so first audio arrives after the first sentence rather than the whole answer.
+resolves reference clips. Streaming: incoming LLM text is split into sentences;
+each sentence's PCM streams from the gateway as the engine emits it (the next
+sentence synthesizing meanwhile) and is re-emitted as one continuous WAV stream,
+so first audio arrives after the first chunk of the first sentence rather than
+after the whole answer. Markdown is stripped before text reaches the engine.
 """
 
 from __future__ import annotations
@@ -27,13 +29,14 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_track_time_interval
 
 from . import client
-from .audio import sentences, stream_header
+from .audio import prefetched, sentences, speakable, stream_header
 from .const import (
     CONF_API_KEY,
     CONF_BASE_URL,
     LANGUAGES,
     LOGGER,
     OPT_OVERRIDES,
+    PREFETCH_DEPTH,
     REFRESH_INTERVAL,
 )
 
@@ -105,7 +108,7 @@ class LocalTTSEntity(TextToSpeechEntity):
         saved = self._entry.options.get(OPT_OVERRIDES, {}).get(voice, {})
         percall = {k: v for k, v in options.items() if k != "voice" and v not in (None, "")}
         overrides = {**saved, **percall}
-        body: dict[str, Any] = {"input": text, "voice": voice, "response_format": "wav"}
+        body: dict[str, Any] = {"input": speakable(text), "voice": voice, "response_format": "wav"}
         if overrides:
             body["extra_params"] = overrides
         return body
@@ -143,19 +146,33 @@ class LocalTTSEntity(TextToSpeechEntity):
         # Split the incoming LLM text into sentences and stream each sentence's
         # PCM from the gateway as the engine emits it — one continuous WAV: a
         # header once, then raw 16-bit-mono frames. First audio arrives after the
-        # first chunk of the first sentence, not after the whole answer.
-        session = async_get_clientsession(self.hass)
+        # first chunk of the first sentence, not after the whole answer. The next
+        # sentence synthesizes while the current one streams, so its first-chunk
+        # latency does not become a gap between sentences.
         header_sent = False
-        async for sentence in sentences(message_gen):
-            body = self._body(sentence, options)
-            try:
-                chunks = client.synth_stream(session, self._base_url, self._api_key, body)
-                sr = await chunks.__anext__()  # first item is the sample rate
+        async for item in prefetched(
+            sentences(message_gen), lambda s: self._synth_sentence(s, options),
+            depth=PREFETCH_DEPTH,
+        ):
+            if isinstance(item, int):  # each sentence stream opens with its sample rate
                 if not header_sent:
-                    yield stream_header(sr, 2, 1)
+                    yield stream_header(item, 2, 1)
                     header_sent = True
-                async for chunk in chunks:
-                    yield chunk
-            except Exception as err:
-                LOGGER.error("TTS stream synth failed on %r: %s", sentence[:40], err)
                 continue
+            yield item
+
+    async def _synth_sentence(
+        self, sentence: str, options: dict[str, Any]
+    ) -> AsyncGenerator[int | bytes]:
+        """One sentence as sample rate then PCM chunks. A failed sentence is
+        logged and skipped so the rest of the answer still plays; a sentence
+        that is only Markdown markup has nothing to say and is skipped."""
+        if not speakable(sentence):
+            return
+        session = async_get_clientsession(self.hass)
+        body = self._body(sentence, options)
+        try:
+            async for item in client.synth_stream(session, self._base_url, self._api_key, body):
+                yield item
+        except Exception as err:
+            LOGGER.error("TTS stream synth failed on %r: %s", sentence[:40], err)
